@@ -1,12 +1,10 @@
-// crush.cpp
+// blush.cpp (original was crush.cpp)
 // Written and placed in the public domain by Ilya Muravyov:         http://compressme.net
 // A few optimisations and streaming-interface by Theodore H. Smith: http://gamblevore.org
-// 
 
-
-// * perhaps my recursive noob-encoding is better????
-// * could we reduce min-match to 2 bytes? 16-bits is better than 18!
-
+// compile: g++ -O3 blush.cpp -o blush -std=c++17
+// todo: make a proper C interface, 
+		 
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,9 +17,7 @@ static const int BUF_SIZE=1<<24;
 static const int HASH1_BITS=21;
 static const int HASH2_BITS=24;
 
-int ASdlaskd = 50;
 struct ByteSlice {
-
 	typedef unsigned char u8;
 	u8* Start;
 	u8* Curr;
@@ -33,19 +29,6 @@ struct ByteSlice {
 	ByteSlice (int n) {
 		Alloc(n);
 	}
-	~ByteSlice () {
-		Free();
-	}
-	bool Alloc (int n) {
-		Curr = Start = (u8*)malloc(n);
-		End = Curr+n*(Curr!=0);
-		return (Curr!=0);
-	}
-	void Free () {
-		free(Start);
-		Start = 0; Curr = 0; End = 0;
-	}
-	
 	ByteSlice (const char* Path) {
 		Start=0;Curr=0;End=0;
 		FILE* F = fopen(Path, "rb");
@@ -63,15 +46,25 @@ struct ByteSlice {
 		}
 		if (F) fclose(F);
 	}
+	~ByteSlice () {
+		Free();
+	}
+	
+	bool Alloc (int n) {
+		Curr = Start = (u8*)malloc(n);
+		End = Curr+n*(Curr!=0);
+		return (Curr!=0);
+	}
+	void Free () {
+		free(Start);
+		Start = 0; Curr = 0; End = 0;
+	}
 	uint32_t Read4() {
 		auto C = (uint32_t*)Curr;
 		auto R = *C++;
 		Curr = (u8*)C;
-//		if (ASdlaskd-- > 0)
-//			printf("%u, ", R);
 		return R;
 	}
-
 	bool Write4(uint32_t X) {
 		auto C = Curr;
 		if (C < End) [[likely]] {
@@ -118,14 +111,11 @@ struct CompressingBuffer {
 	
 	bool Flush() {
 		if (Write(0,0)) return false;
-//		fclose(File);
 		return true;
 	}
-	bool Write4(uint32_t GGG) {
-//		if (ASdlaskd-- > 0)
-//			printf("%u, ", GGG);
+	bool Write4(uint32_t bit32) {
 		ByteSlice& S = Buff;
-		if (S.Write4(GGG)) [[likely]]					// all written
+		if (S.Write4(bit32)) [[likely]]					// all written
 			return true;
 		
 		auto W = fwrite(S.Start, 1, S.Used(), File);
@@ -164,7 +154,6 @@ struct CompressingBuffer {
 #define put_bits(n, x)   (put_bitss(n, x, Out))
 #define get_bits(n)      (get_bitss(S, n, Out))
 inline void put_bitss (int n, uint64_t x, CompressingBuffer& Out) {
-//	printf("%llu+", x);
 	n += Out.BitCount;
 	auto B = Out.BitBuff | (x<<(64-n));
 	if (n >= 32) {
@@ -178,7 +167,6 @@ inline void put_bitss (int n, uint64_t x, CompressingBuffer& Out) {
 }
 
 inline int get_bitss (ByteSlice& BS, int n, CompressingBuffer& Out) {
-//120+126+240+218+216+64+236+202+228
  	int C = Out.BitCount;
 	uint64_t B = Out.BitBuff;
 	if (C < n) {
@@ -190,18 +178,17 @@ inline int get_bitss (ByteSlice& BS, int n, CompressingBuffer& Out) {
 	int X = (int)(B>>(64-n));
 	Out.BitBuff  = B<<n;
 	Out.BitCount = C-n;
-//	printf("%i\n", X);
 	return X;
 }
 
 
 // STUFF
-static const int W_SIZE=1<<W_BITS;
-static const int W_MASK=W_SIZE-1;
+static const int W_SIZE   =1<<W_BITS;
+static const int W_MASK   =W_SIZE-1;
 static const int SLOT_BITS=4;
 static const int NUM_SLOTS=1<<SLOT_BITS;
-//static const int W_MINUS1=W_BITS-NUM_SLOTS;
-static const int W_MINUS1=W_BITS-(NUM_SLOTS-1);
+static const int W_MINUS  =W_BITS-NUM_SLOTS;
+static const int W_MINUS1 =W_MINUS+1;
 
 static const int A_BITS=2; // 1 xx
 static const int B_BITS=2; // 01 xx
@@ -346,40 +333,29 @@ bool compress (ByteSlice& Src, int level, CompressingBuffer& Out) {
 			}
 
 			if (len>=MIN_MATCH) { // Match
-				put_bits(1, 1);
+				put_bits(1, 1); // could even merge this :3
 
 				const int l=len-MIN_MATCH;
-				if (l<A) {
-					// * seems tighter than my noob-coding. Could this be generally useful?
-					// * could we reduce min-match to 2 bytes? can we encode in < 18 bits?
-					put_bits(1, 1);			// 1 
-					put_bits(A_BITS, l);    // merge two writes into one?? for speed.
-				} else if (l<B) {
-					put_bits(2, 1);			// 01
-					put_bits(B_BITS, l-A);
-				} else if (l<C) {
-					put_bits(3, 1);			// 001
-					put_bits(C_BITS, l-B);
-				} else if (l<D) {
-					put_bits(4, 1);			// 0001
-					put_bits(D_BITS, l-C);
-				} else if (l<E) {
-					put_bits(5, 1);			// 00001
-					put_bits(E_BITS, l-D);
-				} else {
-					put_bits(5, 0);			// 00000
-					put_bits(F_BITS, l-E);
+				if (l<A) {									// 1 
+					put_bits(A_BITS+1, l|(1<<A_BITS));
+				} else if (l<B) {							// 01
+					put_bits(B_BITS+2, (l-A)|(1<<B_BITS));
+				} else if (l<C) {							// 001
+					put_bits(C_BITS+3, (l-B)|(1<<C_BITS));
+				} else if (l<D) {							// 0001
+					put_bits(D_BITS+4, (l-C)|(1<<D_BITS));
+				} else if (l<E) {							// 00001
+					put_bits(E_BITS+5, (l-D)|(1<<E_BITS));
+				} else {									// 00000
+					put_bits(F_BITS+5, (l-E)|(0<<E_BITS));
 				}
-				// len=31, l-D=8, log=5/4, offset=31/6
-				// seems this could be simpler???
-				// jsut simply output the total number of bits needed?
-				// we could assume at least 5 bits are needed...
+
 				--offset;
-				int log=W_BITS-NUM_SLOTS;
+				int log=W_MINUS;
 				while (offset>=(2<<log))
 					++log;
-				put_bits(SLOT_BITS, log-(W_BITS-NUM_SLOTS));
-				if (log>(W_BITS-NUM_SLOTS))
+				put_bits(SLOT_BITS, log-W_MINUS);
+				if (log>W_MINUS)
 					put_bits(log, offset-(1<<log));
 				  else
 					put_bits(W_MINUS1, offset);
@@ -418,7 +394,6 @@ bool decompress (ByteSlice& S, CompressingBuffer& Out, int* Err) {
 		int p = 0;
 		while (p<size) {
 			if (get_bits(1)) {
-			// len=31, l-D=8, log=5/4, offset=31/6
 				int len;
 				if (get_bits(1))
 					len=get_bits(A_BITS)+MIN_MATCH;
@@ -433,9 +408,9 @@ bool decompress (ByteSlice& S, CompressingBuffer& Out, int* Err) {
 				  else
 					len=get_bits(F_BITS)+E+MIN_MATCH;
 
-				const int log=get_bits(SLOT_BITS) + (W_BITS-NUM_SLOTS);
+				const int log=get_bits(SLOT_BITS) + W_MINUS;
 				int ago;
-				if (log>(W_BITS-NUM_SLOTS))
+				if (log>W_MINUS)
 					ago = get_bits(log)+(1<<log);
 				  else
 					ago = get_bits(W_MINUS1);
@@ -471,8 +446,9 @@ int main(int argc, char* argv[]) {
 
 	if (argc!=4) {
 		fprintf(stdout,
-			"CRUSH by Ilya Muravyov, v1.00\n"
-			"Usage: CRUSH command infile outfile\n"
+			"Original CRUSH by Ilya Muravyov\n"
+			"Optimisations by Theodore H. Smith\n"
+			"Usage: blush command infile outfile\n"
 			"Commands:\n"
 			"  c[f,x] Compress (Fast..Max)\n"
 			"  d      Decompress\n");
@@ -520,3 +496,4 @@ int main(int argc, char* argv[]) {
 	return 0;
 }
 
+// Note: Crush's length coder seems really tight. I could use this outside of crush? 
