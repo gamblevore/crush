@@ -1,6 +1,6 @@
 # blush
 
-Fast and tight LZ Compression from small code. 
+Fast and tight LZ Compression from small code. Public Domain software.
 
 Original is named "crush", http://compressme.net . This is a beta. It is also not compatible with crush, but it shares the same compression ratio.
 
