@@ -80,9 +80,6 @@ struct ByteSlice {
 		memcpy(C, Data, N2);
 		return N-N2;
 	}
-	uint32_t Int () {
-		return Read4();
-	}
 	bool HasMore () {
 		return Curr < End;
 	}
@@ -384,7 +381,7 @@ bool decompress (ByteSlice& S, CompressingBuffer& Out, int* Err) {
 	static unsigned char buf[BUF_SIZE+MAX_MATCH+7];
 
 	while (S.Remain()) {
-		int size = S.Int();
+		int size = S.Read4();
 		if (size<1 or size>BUF_SIZE) {
 			*Err = size;
 			return false;
