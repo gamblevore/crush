@@ -3,7 +3,7 @@
 // A few optimisations and streaming-interface by Theodore H. Smith: http://gamblevore.org
 
 // compile: g++ -O3 blush.cpp -o blush -std=c++17
-// todo: make a proper C interface, 
+// todo: make a proper C interface, and make decomp share the buffer
 		 
 
 #include <stdio.h>
