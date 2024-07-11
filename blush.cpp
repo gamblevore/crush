@@ -18,7 +18,7 @@
 // seems mz is about 2x faster compress, but decomp is only 20% faster. And crush compresses tighter
 // I'd be happy with crush's approach. However I'm still curious why mine wasn't as tight
 // desite theoretically being better. crush has at best a 14-bit match-code, but it only allows 4 byte length
-// and 64 offset, which would fit almost nothing.
+// and 64 offset, which would fit almost nothing. (4% as stated below, and the average bit-size is 26.6bits!)
 // probably best to first try use the suffix array thing.
 // put this aside for now! its too many options!		 
 
