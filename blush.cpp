@@ -14,10 +14,12 @@
 		// 8) and maybe compress that too, using a range-coder. (the old bit-aware length-coder hahaha)
 	// 9) Can I remove the chunk behaviour?
 	// 10) Make a C-interface?
-	// 11) decompress should share the buffer!! (do this first)
-		// 12) get some proper timings? i think compress is 2x faster for mz, but what about decomp? 
-	// 13) decomp buffer overruns with bad data? (why not comp too?)
 
+// seems mz is about 2x faster compress, but decomp is only 20% faster. And crush compresses tighter
+// I'd be happy with crush's approach. However I'm still curious why mine wasn't as tight
+// desite theoretically being better. crush has at best a 14-bit match-code, but it only allows 4 byte length
+// and 64 offset, which would fit almost nothing.
+// probably best to first try use the suffix array thing.
 // put this aside for now! its too many options!		 
 
 #include <stdio.h>
