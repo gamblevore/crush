@@ -1,2 +1,6 @@
 
 /crush
+SF.*
+crush*
+.*
+*.zip
