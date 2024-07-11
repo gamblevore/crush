@@ -1,16 +1,41 @@
 // blush.cpp (original was crush.cpp)
 // Written and placed in the public domain by Ilya Muravyov:         http://compressme.net
-// A few optimisations and streaming-interface by Theodore H. Smith: http://gamblevore.org
+// A few optimisations and streaming-interface by Theodore H. Smith: http://gamblevore.org// OK so... here are some things I wanan do.
 
-// compile: g++ -O3 blush.cpp -o blush -std=c++17
-// todo: make a proper C interface, and make decomp share the buffer
-		 
+// * Figure out why its tighter than my original mz
+	// 1) is it the 9-bit byte? seems a good idea
+		// or is it how the length is encoded? or the offset?
+	// 2) Can I put my 3-bit len back in? i'd hope so?
+	// 3) how many bits does it take to get almost the same range? 16 still I think?
+		// 4) can i still noob-encode offsets?
+	// 5) is their hash-mmc better than my old suffix-array? (allow both to be used, do some kinda switch/option thingy)
+		// 6) can I optimise my suffix-array with a stackless quicksort?
+	// 7) can I make this a proper byte-aligned thing again? like store the escape bit somewhere...
+		// 8) and maybe compress that too, using a range-coder. (the old bit-aware length-coder hahaha)
+	// 9) Can I remove the chunk behaviour?
+	// 10) Make a C-interface?
+	// 11) decompress should share the buffer!! (do this first)
+		// 12) get some proper timings? i think compress is 2x faster for mz, but what about decomp? 
+	// 13) decomp buffer overruns with bad data? (why not comp too?)
+
+// put this aside for now! its too many options!		 
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#include <chrono>
 
+#if __cplusplus >= 201703L
+	#define ifrare(b) if (b) [[unlikely]]
+	#define ifok(b) if (b) [[likely]]
+#else
+	#define ifrare(b) if (b)
+	#define ifok(b) if (b)
+#endif
+
+
+ 
 // CONFIG
 static const int W_BITS=21; // Window size (17..23)
 static const int BUF_SIZE=1<<24;
@@ -27,7 +52,7 @@ struct ByteSlice {
 		Start=0; Curr=0; End=0;
 	}
 	ByteSlice (int n) {
-		Alloc(n);
+		Alloc(n, false);
 	}
 	ByteSlice (const char* Path) {
 		Start=0;Curr=0;End=0;
@@ -50,8 +75,21 @@ struct ByteSlice {
 		Free();
 	}
 	
-	bool Alloc (int n) {
-		Curr = Start = (u8*)malloc(n);
+	bool Request (int Req) {
+		return (Size() >= Req) or Alloc(Req, true);
+	}
+
+	bool Alloc (int n, bool Realloc) {
+		if (Realloc and Start) {
+			u8* Start2 = (u8*)realloc(Start, n);
+			if (!Start2)
+				return false;
+			Start = Start2;
+		} else {
+			Start = (u8*)malloc(n);
+		}
+		
+		Curr = Start;
 		End = Curr+n*(Curr!=0);
 		return (Curr!=0);
 	}
@@ -67,7 +105,7 @@ struct ByteSlice {
 	}
 	bool Write4(uint32_t X) {
 		auto C = Curr;
-		if (C < End) [[likely]] {
+		ifok (C < End) {
 			*((int*)C) = X;
 			Curr = C + 4;
 			return true;
@@ -104,15 +142,25 @@ struct CompressingBuffer {
 	uint64_t	BitBuff;
 	int			BitCount;
 
-	CompressingBuffer(FILE* f, int n=1024*1024*8) : File(f), Buff(n) {}
+// C++ sucks. I'm sorry. I hate writing this code. Im so sorry. 😭
+	CompressingBuffer(FILE* f, int n) : File(f), Buff(n), BitBuff(0), BitCount(0) {}
+	CompressingBuffer(FILE* f) : File(f), Buff(), BitBuff(0), BitCount(0) {}
 	
+	unsigned char* OutBuffer(int StartAt, int Req) {
+		if (!Buff.Request(Req))
+			return 0;
+		auto S = Buff.Start;
+		Buff.Curr = S + StartAt;
+		return S;
+	}
+
 	bool Flush() {
 		if (Write(0,0)) return false;
 		return true;
 	}
 	bool Write4(uint32_t bit32) {
 		ByteSlice& S = Buff;
-		if (S.Write4(bit32)) [[likely]]					// all written
+		ifok (S.Write4(bit32))							// all written
 			return true;
 		
 		auto W = fwrite(S.Start, 1, S.Used(), File);
@@ -125,7 +173,7 @@ struct CompressingBuffer {
 		ByteSlice& S = Buff;
 			
 		int Remain = S.Write(Data, Length);
-		if (!Remain and Length) [[likely]]				// all written
+		ifok (!Remain and Length)						// all written
 			return Length;
 		
 		Data += Length - Remain;						// its full
@@ -149,7 +197,7 @@ struct CompressingBuffer {
 // Bit I/O
 
 #define put_bits(n, x)   (put_bitss(n, x, Out))
-#define get_bits(n)      (get_bitss(S, n, Out))
+#define get_bits(n)      (get_bitss(In, n, Out))
 inline void put_bitss (int n, uint64_t x, CompressingBuffer& Out) {
 	n += Out.BitCount;
 	auto B = Out.BitBuff | (x<<(64-n));
@@ -236,20 +284,18 @@ inline int get_penalty(int a, int b) {
 }
 
 
-bool compress (ByteSlice& Src, int level, CompressingBuffer& Out) {
-	if (!CompSpace.Start) {
-		int Req = (HASH1_SIZE+HASH2_SIZE+W_SIZE)*sizeof(int);
-		if (!CompSpace.Alloc(Req))
-			return false;
-	}
+bool compress (ByteSlice& In, int level, CompressingBuffer& Out) {
+	const int Req = (HASH1_SIZE+HASH2_SIZE+W_SIZE)*sizeof(int);
+	if (!CompSpace.Request(Req))
+		return false;
 	int* head = (int*)CompSpace.Start;
 	int* prev = head + HASH1_SIZE+HASH2_SIZE;
 
 	const int max_chain[]={4, 256, 1<<12};
-	while (Src.HasMore()) {
-		int size = get_min(Src.Remain(), BUF_SIZE);
-		auto buf = Src.Curr;
-		Src.Curr += size;
+	while (In.HasMore()) {
+		int size = get_min(In.Remain(), BUF_SIZE);
+		auto buf = In.Curr;
+		In.Curr += size;
 		Out.Write4(size);
 		memset(head, -1, (HASH1_SIZE+HASH2_SIZE)*sizeof(int));
 		int h1=0;
@@ -267,6 +313,8 @@ bool compress (ByteSlice& Src, int level, CompressingBuffer& Out) {
 			const int max_match=get_min(MAX_MATCH, size-p);
 			const int limit=get_max(p-W_SIZE, 0);
 
+	
+			/// FIND MATCH
 			if (head[h1]>=limit) {
 				int s=head[h1];
 				if (buf[s]==buf[p]) {
@@ -328,16 +376,18 @@ bool compress (ByteSlice& Src, int level, CompressingBuffer& Out) {
 					s=prev[s&W_MASK];
 				}
 			}
+			/// END FIND MATCH
 
-			if (len>=MIN_MATCH) { // Match
-				put_bits(1, 1); // could even merge this :3
 
+			if (len>=MIN_MATCH) { // Match. 14 bits for smallest item, of offset < 64 and length 1-4 (+minlength)
+				put_bits(1, 1);	  // not sure why this beats my encoder as mine has longer offsets and good length?
+								  // is it simply the byte-escaper?
 				const int l=len-MIN_MATCH;
-				if (l<A) {									// 1 
+				if (l<A) {									// 1 	// 14 bits
 					put_bits(A_BITS+1, l|(1<<A_BITS));
-				} else if (l<B) {							// 01
+				} else if (l<B) {							// 01	// 15 bits
 					put_bits(B_BITS+2, (l-A)|(1<<B_BITS));
-				} else if (l<C) {							// 001
+				} else if (l<C) {							// 001	// 16 bits...
 					put_bits(C_BITS+3, (l-B)|(1<<C_BITS));
 				} else if (l<D) {							// 0001
 					put_bits(D_BITS+4, (l-C)|(1<<D_BITS));
@@ -377,19 +427,18 @@ bool compress (ByteSlice& Src, int level, CompressingBuffer& Out) {
 }
 
 
-bool decompress (ByteSlice& S, CompressingBuffer& Out, int* Err) {
-	static unsigned char buf[BUF_SIZE+MAX_MATCH+7];
-
-	while (S.Remain()) {
-		int size = S.Read4();
-		if (size<1 or size>BUF_SIZE) {
-			*Err = size;
-			return false;
-		}
+int decompress (ByteSlice& In, CompressingBuffer& Out) {
+	int Total = 0; // what about when we remove the chunk system? remove this too?
+	while (In.Remain()) {
+		int Size = In.Read4();
+		Total += Size;
+		ifrare (Size<1 or Size>BUF_SIZE)	return -2;
+		ByteSlice::u8* buf = Out.OutBuffer(Size, Size+7);
+		ifrare (!buf)						return -3;
 
 		Out.BitCount = Out.BitBuff = 0;
 		int p = 0;
-		while (p<size) {
+		while (p<Size) {
 			if (get_bits(1)) {
 				int len;
 				if (get_bits(1))
@@ -412,10 +461,9 @@ bool decompress (ByteSlice& S, CompressingBuffer& Out, int* Err) {
 				  else
 					ago = get_bits(W_MINUS1);
 				int s = p - (ago+1);
-				if (s < 0) {
-					*Err = s;
-					return false;
-				}
+				ifrare (s < 0)				return -4;
+				ifrare (len>Size-p) // buffer overrun. Just save as much as we can.
+					len = Size-p;
 				
 				if (ago>=8) { // much faster :)
 					int L8 = (len + 7) >> 3;
@@ -430,16 +478,16 @@ bool decompress (ByteSlice& S, CompressingBuffer& Out, int* Err) {
 				buf[p++] = get_bits(8);
 			}
 		}
-		Out.Write(buf, p);
+		ifrare (!Out.Flush())				return -1;
 	}
 
-	return Out.Flush();
+	return Total;
 }
 
 
 
 int main(int argc, char* argv[]) {
-	const clock_t start=clock();
+	auto StartTime = std::chrono::system_clock::now();
 
 	if (argc!=4) {
 		fprintf(stdout,
@@ -458,8 +506,8 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 	
-	CompressingBuffer Out = fopen(argv[3], "wb");
-	if (!Out.File) {
+	FILE* f = fopen(argv[3], "wb");
+	if (!f) {
 		perror(argv[3]);
 		exit(1);
 	}
@@ -467,28 +515,36 @@ int main(int argc, char* argv[]) {
 	int A = In.Size();
 	if (*argv[1]=='c') {
 		printf("Compressing %s...\n", argv[2]);
-		int level = argv[1][1]=='f' ? 0:(argv[1][1]=='x' ? 2:1);
+		auto c = argv[1][1];
+		int level = 1 + (c=='x') - (c=='f');
+		CompressingBuffer Out(f, 8*1024*1024); 
 		compress(In, level, Out);
 
 	} else if (*argv[1]=='d') {
 		printf("Decompressing %s...\n", argv[2]);
-		int Err = 0;
-		if (!decompress(In, Out, &Err)) {
+		CompressingBuffer Out(f);
+		int Err = decompress(In, Out);
+		if (Err<0) {
 			fprintf(stderr, "Decompression failed: %i\n", Err);
 			exit(1);
 		}
-			
 	
 	} else {
 		fprintf(stderr, "Unknown command: %s\n", argv[1]);
 		exit(1);
 	}
 
-	int B = (int)ftell(Out.File);
-	printf("%i -> %i in %.2fs (%.2f%%)\n", A, B,
-		double(clock()-start)/CLOCKS_PER_SEC, (100.0*(double)B)/(double)A);
+	auto EndTime = std::chrono::system_clock::now();
+	auto Durr    = std::chrono::duration<double>(EndTime-StartTime);
+	auto Seconds = Durr.count();
+	int  B       = (int)ftell(f);
+	auto Ratio   = (100.0*(double)B)/(double)A;
+	int  XX		 = (*argv[1]=='c') ? A:B; 
+	auto MBPS	 = ((double)XX/(1024.0*1024.0)) / Seconds;
+	printf("%i -> %i in %.2fs (%.1f%%) at %.2fMB/s\n", A, B,
+		Seconds, Ratio, MBPS);
 
-	fclose(Out.File);
+	fclose(f);
 
 	return 0;
 }
