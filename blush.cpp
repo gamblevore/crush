@@ -143,6 +143,7 @@ struct CompressingBuffer {
 	
 	uint64_t	BitBuff;
 	int			BitCount;
+	int			Mork;
 
 // C++ sucks. I'm sorry. I hate writing this code. Im so sorry. 😭
 	CompressingBuffer(FILE* f, int n) : File(f), Buff(n), BitBuff(0), BitCount(0) {}
@@ -156,9 +157,16 @@ struct CompressingBuffer {
 		return S;
 	}
 
+	void Mark() {
+		Mork = 0;
+	}
+	int UnMark() {
+		if (Mork > 100)
+			__builtin_trap();
+		return Mork;
+	}
 	bool Flush() {
-		if (Write(0,0)) return false;
-		return true;
+		return !Write(0,0);
 	}
 	bool Write4(uint32_t bit32) {
 		ByteSlice& S = Buff;
@@ -201,6 +209,7 @@ struct CompressingBuffer {
 #define put_bits(n, x)   (put_bitss(n, x, Out))
 #define get_bits(n)      (get_bitss(In, n, Out))
 inline void put_bitss (int n, uint64_t x, CompressingBuffer& Out) {
+	Out.Mork+=n;
 	n += Out.BitCount;
 	auto B = Out.BitBuff | (x<<(64-n));
 	if (n >= 32) {
@@ -277,14 +286,16 @@ inline int get_min(int a, int b) { return a<b?a:b; }
 inline int get_max(int a, int b) { return a>b?a:b; }
 
 inline int get_penalty(int a, int b) {
-	int p=0;
-	while (a>b) {
-		a>>=3;
+	int p = 0;
+	while (a > b) {
+		a >>= 3;
 		++p;
 	}
 	return p;
 }
 
+
+int OffSize[100];
 
 bool compress (ByteSlice& In, int level, CompressingBuffer& Out) {
 	const int Req = (HASH1_SIZE+HASH2_SIZE+W_SIZE)*sizeof(int);
@@ -380,25 +391,28 @@ bool compress (ByteSlice& In, int level, CompressingBuffer& Out) {
 			}
 			/// END FIND MATCH
 
-
+			
 			if (len>=MIN_MATCH) { // Match. 14 bits for smallest item, of offset < 64 and length 1-4 (+minlength)
+				Out.Mark();
 				put_bits(1, 1);	  // not sure why this beats my encoder as mine has longer offsets and good length?
-								  // is it simply the byte-escaper?
+								  // is it simply the byte-escaper? Maybe mine was outputting many 24-bit codes?
+								  // crush is using 26.6 bits on average per code, though!! Something is seriouslypu
+								  // mine should outperform crush by a lot!
 				const int l=len-MIN_MATCH;
-				if (l<A) {									// 1 	// 14 bits
+				if (l<A) {									// 1 	// 14+ bits    // 4% occurance
 					put_bits(A_BITS+1, l|(1<<A_BITS));
-				} else if (l<B) {							// 01	// 15 bits
+				} else if (l<B) {							// 01	// 15+ bits	   // 13%
 					put_bits(B_BITS+2, (l-A)|(1<<B_BITS));
-				} else if (l<C) {							// 001	// 16 bits...
+				} else if (l<C) {							// 001	// 16+ bits... // 13%
 					put_bits(C_BITS+3, (l-B)|(1<<C_BITS));
-				} else if (l<D) {							// 0001
+				} else if (l<D) {							// 0001	// 17+ bits	   // 27%
 					put_bits(D_BITS+4, (l-C)|(1<<D_BITS));
-				} else if (l<E) {							// 00001
+				} else if (l<E) {							// 00001// 18+ bits    // 36.6%
 					put_bits(E_BITS+5, (l-D)|(1<<E_BITS));
-				} else {									// 00000
+				} else {									// 00000// 19+ bits    // 6.4%
 					put_bits(F_BITS+5, (l-E)|(0<<E_BITS));
 				}
-
+				// (29713*100)/(20254+62731+63445+127079+173884+29713)
 				--offset;
 				int log=W_MINUS;
 				while (offset>=(2<<log))
@@ -408,6 +422,7 @@ bool compress (ByteSlice& In, int level, CompressingBuffer& Out) {
 					put_bits(log, offset-(1<<log));
 				  else
 					put_bits(W_MINUS1, offset);
+				OffSize[Out.UnMark()]++;
 			} else { // Literal
 				put_bits(9, buf[p]); // 0 xxxxxxxx
 				len=1;
@@ -425,6 +440,19 @@ bool compress (ByteSlice& In, int level, CompressingBuffer& Out) {
 		put_bits(31, 0);
 		Out.BitCount=Out.BitBuff=0;
 	}
+	
+	int BitTotal = 0;
+	int CodeCount = 0;
+	for (int i = 0; i < 100; i++) {
+		CodeCount += OffSize[i];
+		BitTotal += OffSize[i]*i;
+	}
+	
+	for (int i = 0; i < 100; i++)
+		if (OffSize[i])
+			printf("%i %.1f%%\n", i, ((100.0*OffSize[i])/BitTotal));
+	float avg = (float)BitTotal / (float)CodeCount;
+	printf("%.2f bits per code (avg)\n", avg);
 	return Out.Flush();
 }
 
